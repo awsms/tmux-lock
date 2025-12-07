@@ -1,0 +1,276 @@
+#!/usr/bin/env expect
+
+set exit_status 0
+log_user 0
+set timeout 15
+match_max 100000
+
+# utils
+proc sync_tmux {} { after 500 } ;# small settle time
+proc fail {} { global exit_status; set exit_status 1 }
+proc sh {cmd} {
+    set out ""
+    catch { set out [exec sh -lc "$cmd 2>&1"] } _
+    return [string trim $out]
+}
+proc tmux_run {cmd} { send "$cmd\r"; sync_tmux }
+proc get {cmd} { return [sh $cmd] }
+proc key_present {table key} {
+    set out [get "tmux list-keys -T $table $key || true"]
+    if {$out eq ""} { return 0 } else { return 1 }
+}
+
+# helper to briefly attach a *temporary* client without stealing the pty
+proc with_temp_client {session {ms 200}} {
+    set before [sh "tmux list-clients -F '#{client_tty}' || true"]
+    set saved $::spawn_id
+    spawn -noecho tmux attach -t $session
+    after $ms
+    set after_list [sh "tmux list-clients -F '#{client_tty}' || true"]
+    set newtty ""
+    foreach t [split $after_list "\n"] {
+        if {[string length $t] && [lsearch -exact [split $before "\n"] $t] == -1} {
+            set newtty $t
+            break
+        }
+    }
+    if {$newtty ne ""} {
+        sh "tmux kill-client -t $newtty"
+    }
+    catch { close }
+    catch { wait }
+    set ::spawn_id $saved
+}
+
+# assert helpers
+proc assert_eq {got expected msg} {
+    if {[string compare $got $expected] == 0} {
+        puts "  Success: $msg"
+    } else {
+        puts "  Fail: $msg\n    got:      <$got>\n    expected: <$expected>"
+        fail
+    }
+}
+proc assert_contains {hay needle msg} {
+    if {[string match *$needle* $hay]} {
+        puts "  Success: $msg"
+    } else {
+        puts "  Fail: $msg\n    hay: <$hay>\n    needle: <$needle>"
+        fail
+    }
+}
+proc assert_not_contains {hay needle msg} {
+    if {[string match *$needle* $hay]} {
+        puts "  Fail: $msg (unexpectedly found <$needle> in <$hay>)"
+        fail
+    } else {
+        puts "  Success: $msg"
+    }
+}
+proc assert_true {expr msg} {
+    if {[uplevel 1 [list expr $expr]]} {
+        puts "  Success: $msg"
+    } else {
+        puts "  Fail: $msg"
+        fail
+    }
+}
+
+# boot server with the test config
+spawn bash
+sync_tmux
+puts "\n1) start server with test conf"
+puts "------------------------------"
+tmux_run "tmux -f /app/tests/tmux.conf new-session -d -s locktest bash"
+tmux_run "tmux -f /app/tests/tmux.conf attach -t locktest"
+
+# silence message line so 'display-message' doesn't print to pty
+tmux_run "tmux set -g display-time 0"
+
+# Re-run plugin + (re)source conf (mirror user flow)
+tmux_run "tmux run-shell /app/tmux-lock.tmux"
+tmux_run "tmux source-file /app/tests/tmux.conf"
+sync_tmux
+
+# Collect constants we'll compare against
+set orig_left    [get "tmux show -gv status-left"]
+set lock_block   [get "tmux show -gv @tmux_lock_block"]
+set toggle_key   [get "tmux show -gv @tmux_lock_toggle_key"]
+set rescue_key   [get "tmux show -gv @tmux_lock_rescue_key"]
+if {$orig_left eq ""} { set orig_left "ORIG-LEFT" }
+
+puts "\n2) initial state & bindings"
+puts "---------------------------"
+assert_eq $orig_left "ORIG-LEFT" "status-left starts at ORIG-LEFT"
+assert_true {[key_present root $toggle_key]}   "toggle bound in root"
+assert_true {[key_present off  $toggle_key]}   "toggle bound in off"
+assert_true {[key_present root $rescue_key]}   "rescue bound in root"
+assert_true {[key_present off  $rescue_key]}   "rescue bound in off"
+assert_true {[key_present root MouseDown1StatusLeft]} "MouseDown1StatusLeft bound in root"
+assert_true {[key_present off  MouseDown1StatusLeft]} "MouseDown1StatusLeft bound in off"
+
+set pageup_line [get "tmux list-keys -T root C-Pageup || tmux list-keys -T root C-PPage || true"]
+set left_line   [get "tmux list-keys -T root C-S-Left || true"]
+assert_true {[string length $pageup_line] > 0} "PageUp synthetic bind present before lock"
+assert_true {[string length $left_line]  > 0}  "C-S-Left synthetic bind present before lock"
+
+tmux_run {tmux set -s user-keys[0] up-0}
+tmux_run {tmux set -s user-keys[1] up-1}
+set uk0_before [get {tmux show -sv 'user-keys[0]' || true}]
+set uk1_before [get {tmux show -sv 'user-keys[1]' || true}]
+assert_eq $uk0_before "up-0" {user-keys[0] set before lock}
+assert_eq $uk1_before "up-1" {user-keys[1] set before lock}
+
+puts "\n3) lock ON via script"
+puts "---------------------"
+tmux_run "tmux run-shell \"TMUX_LOCK_TARGET=\#{client_tty} /app/scripts/lock_on.sh\""
+set state_on      [get "tmux show -gv @tmux_lock_state"]
+set keytable_on   [get "tmux display -p '#{client_key_table}'"]
+set prefix_on     [get "tmux show -gv prefix"]
+set st_flag_on    [get "tmux show -gv status"]
+assert_eq $st_flag_on "off" "status is hidden while locked when feature enabled"
+set status_locked [get "tmux show -gv status-left"]
+assert_contains $state_on "on"     "state is 'on'"
+assert_contains $keytable_on "off" "client key-table switched to 'off'"
+assert_contains $prefix_on "None"  "prefix set to None while locked"
+assert_eq $status_locked $lock_block "status-left is exactly the LOCKED badge"
+
+set bl_user0   [get "tmux list-keys -T root User0 || true"]
+set bl_pageup2 [get "tmux list-keys -T root C-Pageup || tmux list-keys -T root C-PPage || true"]
+set bl_csl     [get "tmux list-keys -T root C-S-Left || true"]
+assert_eq $bl_user0  "" "User0 unbound while locked"
+assert_eq $bl_pageup2 "" "PageUp unbound while locked"
+assert_eq $bl_csl    "" "C-S-Left unbound while locked"
+
+puts "\n4) unlock via script"
+puts "--------------------"
+tmux_run "tmux run-shell \"TMUX_LOCK_TARGET=\#{client_tty} /app/scripts/lock_off.sh\""
+set state_off_now   [get "tmux show -gv @tmux_lock_state"]
+set keytable_off    [get "tmux display -p '#{client_key_table}'"]
+set prefix_off      [get "tmux show -gv prefix"]
+set status_unlocked [get "tmux show -gv status-left"]
+set st_flag_off     [get "tmux show -gv status"]
+assert_eq $st_flag_off "on" "status is restored on unlock"
+assert_contains $state_off_now "off"  "state is 'off'"
+assert_not_contains $keytable_off "off" "client key-table no longer 'off'"
+assert_not_contains $prefix_off "None"  "prefix restored (not None)"
+assert_eq $status_unlocked "ORIG-LEFT" "status-left restored to original text"
+
+tmux_run "tmux source-file /app/tests/tmux.conf"
+set rebuilt_pageup [get "tmux list-keys -T root C-Pageup || tmux list-keys -T root C-PPage || true"]
+assert_contains $rebuilt_pageup "\#{pane_id}" "format tokens preserved on re-source"
+
+set uk0_after [get {tmux show -sv 'user-keys[0]' || true}]
+set uk1_after [get {tmux show -sv 'user-keys[1]' || true}]
+assert_eq $uk0_after "up-0" {user-keys[0] restored}
+assert_eq $uk1_after "up-1" {user-keys[1] restored}
+
+puts "\n5) rapid toggles (with_lock.sh) x8"
+puts "-----------------------------------"
+tmux_run "tmux run-shell /app/scripts/lock_off.sh"
+sync_tmux
+for {set i 0} {$i < 8} {incr i} {
+    tmux_run "tmux run-shell /app/scripts/with_lock.sh toggle"
+    after 40
+}
+set state_after_burst  [get "tmux show -gv @tmux_lock_state"]
+set kt_after_burst     [get "tmux display -p '#{client_key_table}'"]
+set prefix_after_burst [get "tmux show -gv prefix"]
+set status_after_burst [get "tmux show -gv status-left"]
+assert_contains $state_after_burst "off" "state OFF after even rapid toggles"
+assert_not_contains $kt_after_burst "off" "client key-table back to normal after rapid toggles"
+assert_not_contains $prefix_after_burst "None" "prefix back after rapid toggles"
+assert_eq $status_after_burst "ORIG-LEFT" "status-left restored after rapid toggles"
+
+puts "\n6) badge persists across detach/attach"
+puts "--------------------------------------"
+
+# hard baseline
+set curtty [get "tmux display -p '#{client_tty}'"]
+sh "tmux set-hook -gu client-attached"
+sh "TMUX_LOCK_TARGET=$curtty /app/scripts/with_lock.sh off"
+sh "tmux set -u key-table"
+sh "tmux switch-client -T root"
+sh "tmux set -g status-left '$orig_left'"
+sh "tmux set -g @tmux_lock_state off"
+after 150
+
+# prechecks
+assert_eq           [get "tmux show -gv status-left"] $orig_left "precheck: origin showing"
+assert_contains     [get "tmux show -gv @tmux_lock_state"] "off"  "precheck: state off"
+assert_not_contains [get "tmux display -p '#{client_key_table}'"] "off" "precheck: table root"
+
+# lock and verify badge
+sh "TMUX_LOCK_TARGET=$curtty /app/scripts/lock_on.sh"
+assert_eq [get "tmux show -gv status-left"] $lock_block "badge before attach"
+
+# simulate detach/attach using a temp client (doesn't steal our pty)
+with_temp_client locktest 250
+
+# still locked after a fresh client attaches
+assert_eq [get "tmux show -gv status-left"] $lock_block "badge after attach"
+
+# cleanup so block 7 starts clean
+sh "TMUX_LOCK_TARGET=$curtty /app/scripts/with_lock.sh off"
+sh "tmux set -u key-table"
+sh "tmux switch-client -T root"
+sh "tmux set -g status-left '$orig_left'"
+after 100
+sh "tmux set -g @tmux_lock_state off"
+
+assert_eq           [get "tmux show -gv status-left"] $orig_left "cleanup: origin restored"
+assert_contains     [get "tmux show -gv @tmux_lock_state"] "off"  "cleanup: state off"
+assert_not_contains [get "tmux display -p '#{client_key_table}'"] "off" "cleanup: table root"
+
+puts "\n7) explicit status-left origin change survives lock/unlock"
+puts "----------------------------------------------------------"
+
+# work synchronously on THIS client
+set curtty [get "tmux display -p '#{client_tty}'"]
+
+# Hard reset so we never start with the badge showing (and kill any stale hooks)
+sh "tmux set-hook -gu client-attached"
+sh "TMUX_LOCK_TARGET=$curtty /app/scripts/with_lock.sh off"
+sh "tmux set -u key-table"
+sh "tmux switch-client -T root"
+sh "tmux set -g status-left 'ORIG-LEFT'"
+sh "tmux set -g @tmux_lock_state off"
+sh "tmux refresh-client -S"
+after 200
+
+# Baseline sanity
+set st7_state [get "tmux show -gv @tmux_lock_state"]
+set st7_table [get "tmux display -p '#{client_key_table}'"]
+set st7_left  [get "tmux show -gv status-left"]
+puts [format {DEBUG[baseline]: state=<%s> table=<%s> left=<%s>} $st7_state $st7_table $st7_left]
+assert_contains     $st7_state "off"   "state off before origin change"
+assert_not_contains $st7_table "off"   "client table is root (not 'off')"
+assert_not_contains $st7_left  "LOCKED" "badge not showing before change"
+
+# Change the origin explicitly
+sh "tmux set -g status-left 'ORIG-LEFT-CHANGED'"
+after 120
+set new_orig [get "tmux show -gv status-left"]
+assert_eq $new_orig "ORIG-LEFT-CHANGED" "we changed origin text"
+
+# LOCK (sync) => badge should show, compare *inside tmux* to avoid quoting pitfalls
+sh "TMUX_LOCK_TARGET=$curtty /app/scripts/lock_on.sh"
+after 150
+set is_exact [get "tmux display -p '#{==:#{status-left},#{@tmux_lock_block}}'"]
+assert_eq $is_exact "1" "LOCKED badge shown after changing origin"
+
+# UNLOCK (sync) => exact origin should come back
+sh "TMUX_LOCK_TARGET=$curtty /app/scripts/lock_off.sh"
+after 150
+assert_eq [get "tmux show -gv status-left"] "ORIG-LEFT-CHANGED" "origin restored exactly after unlock"
+
+puts "\n8) rescue & mouse bindings are present (sanity)"
+puts "-----------------------------------------------"
+assert_true {[key_present root $rescue_key]}   "rescue remains bound in root"
+assert_true {[key_present off  $rescue_key]}   "rescue remains bound in off"
+assert_true {[key_present root MouseDown1StatusLeft]} "MouseDown1StatusLeft still bound in root"
+assert_true {[key_present off  MouseDown1StatusLeft]} "MouseDown1StatusLeft still bound in off"
+
+# done!
+tmux_run "tmux kill-server"
+exit $exit_status
