@@ -25,4 +25,4 @@ status_set_origin
 # optionally restore the status bar visibility
 status_restore_if_enabled
 tmux refresh-client -S
-tmux display-message "Lock: OFF (tmux active, binds & user-keys restored)"
+tmux display-message "#[bg=#{@tmux_lock_bar_bg},fg=#{@tmux_lock_passthrough_bg},fill=#{@tmux_lock_bar_bg}]Lock: OFF (tmux active, binds & user-keys restored)"

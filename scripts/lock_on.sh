@@ -39,4 +39,4 @@ status_set_locked
 # optionally hide the status bar entirely while locked
 status_hide_if_enabled
 tmux refresh-client -S
-tmux display-message "Lock: ON (raw keys will be sent to remote/nested tmux/program)"
+tmux display-message "#[bg=#{@tmux_lock_passthrough_bg},fg=#{@tmux_lock_p_text_color},fill=#{@tmux_lock_passthrough_bg}]Lock: ON (raw keys will be sent to remote/nested tmux/program)"
