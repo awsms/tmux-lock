@@ -16,7 +16,8 @@ proc sh {cmd} {
 proc tmux_run {cmd} { send "$cmd\r"; sync_tmux }
 proc get {cmd} { return [sh $cmd] }
 proc key_present {table key} {
-    set out [get "tmux list-keys -T $table $key || true"]
+    # list all keys in the table to avoid tmux's single-match-to-status-bar behavior
+    set out [get "tmux list-keys -T $table | grep \" $key \" || true"]
     if {$out eq ""} { return 0 } else { return 1 }
 }
 

@@ -45,9 +45,11 @@ save_user_keys() {
 }
 
 save_user_binds() {
+  local all_binds
+  all_binds="$(tmux list-keys -T root -F "bind-key #{?key_repeat,-r ,}-T #{key_table} #{key_string} #{key_command}" 2>/dev/null || tmux list-keys -T root)"
   split_words "$(get @tmux_lock_user_keys)"
   for idx in "${arr[@]:-}"; do
-    line="$(tmux list-keys -T root | sed -n "s/^bind-key -T root User$idx \(.*\)$/bind-key -T root User$idx \1/p" | head -n1 || true)"
+    line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root User$idx[[:space:]]\+\(.*\)$/bind-key \1-T root User$idx \2/p" | head -n1 || true)"
     setopt "@tmux_lock_saved_bind_User$idx" "${line:-}"
   done
 }
@@ -82,12 +84,11 @@ restore_user_binds() {
 # save/unbind/restore specific -T root keys (@tmux_lock_unbind_keys)
 save_unbind_keys() {
   split_words "$(get @tmux_lock_unbind_keys)"
-  local i=0 line
+  local i=0 line all_binds
+  all_binds="$(tmux list-keys -T root -F "bind-key #{?key_repeat,-r ,}-T #{key_table} #{key_string} #{key_command}" 2>/dev/null || tmux list-keys -T root)"
   for key in "${arr[@]:-}"; do
     # save the full bind line (normalized so we can re-source it later)
-    line="$(tmux list-keys -T root "$key" 2>/dev/null \
-            | sed -n 's/^[[:space:]]*bind-key \(-n \)\?-T root /bind-key -T root /p' \
-            | head -n1 || true)"
+    line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root $key[[:space:]]\+\(.*\)$/bind-key \1-T root $key \2/p" | head -n1 || true)"
     setopt "@tmux_lock_saved_unbind_$i" "${line:-}"
     setopt "@tmux_lock_saved_unbind_key_$i" "$key"
     i=$((i+1))
