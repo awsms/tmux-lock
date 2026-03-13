@@ -84,11 +84,22 @@ restore_user_binds() {
 # save/unbind/restore specific -T root keys (@tmux_lock_unbind_keys)
 save_unbind_keys() {
   split_words "$(get @tmux_lock_unbind_keys)"
-  local i=0 line all_binds
+  local i=0 line all_binds norm_key
   all_binds="$(tmux list-keys -T root -F "bind-key #{?key_repeat,-r ,}-T #{key_table} #{key_string} #{key_command}" 2>/dev/null || tmux list-keys -T root)"
   for key in "${arr[@]:-}"; do
+    # Normalize key name (e.g. C-Pageup -> C-PPage) by asking tmux what it thinks the name is
+    # We bind it to a temp table and read it back. We use two binds to force stdout.
+    norm_key="$(tmux bind-key -T _norm a display \; bind-key -T _norm "$key" display \; list-keys -T _norm -F "#{key_string}" | grep -v "^a$" | head -n1 || echo "$key")"
+    tmux unbind-key -a -T _norm 2>/dev/null || true
+
     # save the full bind line (normalized so we can re-source it later)
-    line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root $key[[:space:]]\+\(.*\)$/bind-key \1-T root $key \2/p" | head -n1 || true)"
+    line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root $norm_key[[:space:]]\+\(.*\)$/bind-key \1-T root $norm_key \2/p" | head -n1 || true)"
+    
+    # fallback: if we couldn't find the normalized key, try the original key name
+    if [[ -z "$line" && "$norm_key" != "$key" ]]; then
+       line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root $key[[:space:]]\+\(.*\)$/bind-key \1-T root $key \2/p" | head -n1 || true)"
+    fi
+
     setopt "@tmux_lock_saved_unbind_$i" "${line:-}"
     setopt "@tmux_lock_saved_unbind_key_$i" "$key"
     i=$((i+1))
