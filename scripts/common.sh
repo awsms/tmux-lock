@@ -33,6 +33,33 @@ restore_prefix() {
 
 # user-keys save/restore
 split_words() { local s="${1:-}"; arr=($s); }  # shellcheck disable=SC2206
+load_root_binds() {
+  if [ "${tmux_lock_root_binds_loaded:-0}" != "1" ]; then
+    tmux_lock_root_binds="$(tmux list-keys -T root -F "bind-key #{?key_repeat,-r ,}-T #{key_table} #{key_string} #{key_command}" 2>/dev/null || tmux list-keys -T root)"
+    tmux_lock_root_binds_loaded=1
+  fi
+}
+find_root_bind() {
+  local key="$1" line
+  load_root_binds
+  while IFS= read -r line; do
+    case "$line" in
+      bind-key*" -T root $key "*)
+        printf '%s\n' "$line"
+        return 0
+        ;;
+    esac
+  done <<< "$tmux_lock_root_binds"
+}
+normalise_key_alias() {
+  case "$1" in
+    Pageup) printf '%s\n' PPage ;;
+    Pagedown) printf '%s\n' NPage ;;
+    *-Pageup) printf '%s-PPage\n' "${1%-Pageup}" ;;
+    *-Pagedown) printf '%s-NPage\n' "${1%-Pagedown}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
 
 save_user_keys() {
   split_words "$(get @tmux_lock_user_keys)"
@@ -45,89 +72,104 @@ save_user_keys() {
 }
 
 save_user_binds() {
-  local all_binds
-  all_binds="$(tmux list-keys -T root -F "bind-key #{?key_repeat,-r ,}-T #{key_table} #{key_string} #{key_command}" 2>/dev/null || tmux list-keys -T root)"
+  local cmd=() line
   split_words "$(get @tmux_lock_user_keys)"
   for idx in "${arr[@]:-}"; do
-    line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root User$idx[[:space:]]\+\(.*\)$/bind-key \1-T root User$idx \2/p" | head -n1 || true)"
-    setopt "@tmux_lock_saved_bind_User$idx" "${line:-}"
+    line="$(find_root_bind "User$idx")"
+    [ "${#cmd[@]}" -gt 0 ] && cmd+=(\;)
+    cmd+=(set-option -gq "@tmux_lock_saved_bind_User$idx" "${line:-}")
   done
+  [ "${#cmd[@]}" -gt 0 ] && tmux "${cmd[@]}" 2>/dev/null || true
 }
 
 unset_user_keys() {
+  local cmd=()
   split_words "$(get @tmux_lock_user_keys)"
   for idx in "${arr[@]:-}"; do
-    tmux set -su "user-keys[$idx]" 2>/dev/null || true
-    tmux unbind -T root "User$idx" 2>/dev/null || true
-    tmux unbind -n      "User$idx" 2>/dev/null || true
+    [ "${#cmd[@]}" -gt 0 ] && cmd+=(\;)
+    cmd+=(set-option -q -su "user-keys[$idx]")
+    cmd+=(\; unbind-key -q -T root "User$idx")
+    cmd+=(\; unbind-key -q -n "User$idx")
   done
+  [ "${#cmd[@]}" -gt 0 ] && tmux "${cmd[@]}" 2>/dev/null || true
 }
 
 restore_user_keys() {
+  local cmd=()
   split_words "$(get @tmux_lock_user_keys)"
   for idx in "${arr[@]:-}"; do
     saved="$(tmux show -gv "@tmux_lock_saved_user_key_$idx" 2>/dev/null || true)"
-    if [[ -n "$saved" ]]; then tmux set -s "user-keys[$idx]" "$saved" 2>/dev/null || true
-    else tmux set -su "user-keys[$idx]" 2>/dev/null || true; fi
+    [ "${#cmd[@]}" -gt 0 ] && cmd+=(\;)
+    if [[ -n "$saved" ]]; then
+      cmd+=(set-option -q -s "user-keys[$idx]" "$saved")
+    else
+      cmd+=(set-option -q -s -u "user-keys[$idx]")
+    fi
   done
+  [ "${#cmd[@]}" -gt 0 ] && tmux "${cmd[@]}" 2>/dev/null || true
 }
 
 restore_user_binds() {
+  local script=""
   split_words "$(get @tmux_lock_user_keys)"
   for idx in "${arr[@]:-}"; do
     line="$(tmux show -gv "@tmux_lock_saved_bind_User$idx" 2>/dev/null || true)"
     # [ -n "$line" ] && tmux run-shell "tmux $line" 2>/dev/null || true
-    [ -n "$line" ] && tmux source - <<<"$line" 2>/dev/null || true
+    [ -n "$line" ] && script+="$line"$'\n'
   done
+  [ -n "$script" ] && tmux source - <<<"$script" 2>/dev/null || true
 }
 
 # save/unbind/restore specific -T root keys (@tmux_lock_unbind_keys)
 save_unbind_keys() {
+  local cmd=()
   split_words "$(get @tmux_lock_unbind_keys)"
-  local i=0 line all_binds norm_key
-  all_binds="$(tmux list-keys -T root -F "bind-key #{?key_repeat,-r ,}-T #{key_table} #{key_string} #{key_command}" 2>/dev/null || tmux list-keys -T root)"
+  local i=0 line norm_key
   for key in "${arr[@]:-}"; do
-    # Normalize key name (e.g. C-Pageup -> C-PPage) by asking tmux what it thinks the name is
-    # We bind it to a temp table and read it back. We use two binds to force stdout.
-    norm_key="$(tmux bind-key -T _norm a display \; bind-key -T _norm "$key" display \; list-keys -T _norm -F "#{key_string}" | grep -v "^a$" | head -n1 || echo "$key")"
-    tmux unbind-key -a -T _norm 2>/dev/null || true
+    # Normalize common tmux aliases like C-Pageup -> C-PPage.
+    norm_key="$(normalise_key_alias "$key")"
 
     # save the full bind line (normalized so we can re-source it later)
-    line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root $norm_key[[:space:]]\+\(.*\)$/bind-key \1-T root $norm_key \2/p" | head -n1 || true)"
+    line="$(find_root_bind "$norm_key")"
     
     # fallback: if we couldn't find the normalized key, try the original key name
     if [[ -z "$line" && "$norm_key" != "$key" ]]; then
-       line="$(echo "$all_binds" | sed -n "s/^[[:space:]]*bind-key[[:space:]]\+\(-r \)\?-T root $key[[:space:]]\+\(.*\)$/bind-key \1-T root $key \2/p" | head -n1 || true)"
+       line="$(find_root_bind "$key")"
     fi
 
-    setopt "@tmux_lock_saved_unbind_$i" "${line:-}"
-    setopt "@tmux_lock_saved_unbind_key_$i" "$key"
+    [ "${#cmd[@]}" -gt 0 ] && cmd+=(\;)
+    cmd+=(set-option -gq "@tmux_lock_saved_unbind_$i" "${line:-}")
+    cmd+=(\; set-option -gq "@tmux_lock_saved_unbind_key_$i" "$key")
     i=$((i+1))
   done
-  setopt @tmux_lock_saved_unbind_count "$i"
+  [ "${#cmd[@]}" -gt 0 ] && cmd+=(\;)
+  cmd+=(set-option -gq @tmux_lock_saved_unbind_count "$i")
+  tmux "${cmd[@]}" 2>/dev/null || true
 }
 
 do_unbind_keys() {
-  local count key
+  local count key cmd=()
   count="$(tmux show -gv @tmux_lock_saved_unbind_count 2>/dev/null || echo 0)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   for ((i=0; i<count; i++)); do
     key="$(tmux show -gv "@tmux_lock_saved_unbind_key_$i" 2>/dev/null || true)"
-    [ -n "$key" ] && {
-      tmux unbind -T root "$key" 2>/dev/null || true
-      tmux unbind -n      "$key" 2>/dev/null || true
-    }
+    [ -n "$key" ] || continue
+    [ "${#cmd[@]}" -gt 0 ] && cmd+=(\;)
+    cmd+=(unbind-key -q -T root "$key")
+    cmd+=(\; unbind-key -q -n "$key")
   done
+  [ "${#cmd[@]}" -gt 0 ] && tmux "${cmd[@]}" 2>/dev/null || true
 }
 
 restore_global_binds() {
-  local count line
+  local count line script=""
   count="$(tmux show -gv @tmux_lock_saved_unbind_count 2>/dev/null || echo 0)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   for ((i=0; i<count; i++)); do
     line="$(tmux show -gv "@tmux_lock_saved_unbind_$i" 2>/dev/null || true)"
-    [ -n "$line" ] && tmux source - <<<"$line" 2>/dev/null || true
+    [ -n "$line" ] && script+="$line"$'\n'
   done
+  [ -n "$script" ] && tmux source - <<<"$script" 2>/dev/null || true
 }
 
 # status helpers
