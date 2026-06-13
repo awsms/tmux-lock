@@ -5,12 +5,43 @@ log_user 0
 set timeout 15
 match_max 100000
 
+if {[info exists env(TMUX_LOCK_TEST_ROOT)]} {
+    set root $env(TMUX_LOCK_TEST_ROOT)
+} else {
+    set root [file normalize [file join [file dirname [info script]] ..]]
+}
+
+if {[info exists env(TMUX_LOCK_TEST_SOCKET)]} {
+    set socket $env(TMUX_LOCK_TEST_SOCKET)
+} else {
+    set socket "/tmp/tmux-lock-test-[pid].sock"
+}
+
+catch {unset env(TMUX)}
+
+proc shell_quote {s} {
+    regsub -all {'} $s {'"'"'} s
+    return "'$s'"
+}
+
+set tmux_cmd "env -u TMUX tmux -S [shell_quote $socket]"
+set test_conf "$root/tests/tmux.conf"
+set plugin_file "$root/tmux-lock.tmux"
+set lock_on "$root/scripts/lock_on.sh"
+set lock_off "$root/scripts/lock_off.sh"
+set with_lock "$root/scripts/with_lock.sh"
+set auto_lock "$root/scripts/auto_lock.sh"
+
 # utils
 proc sync_tmux {} { after 500 } ;# small settle time
 proc fail {} { global exit_status; set exit_status 1 }
 proc sh {cmd} {
+    global socket
     set out ""
-    catch { set out [exec sh -lc "$cmd 2>&1"] } _
+    set socket_q [shell_quote $socket]
+    set tmux_env_q [shell_quote "$socket,0,0"]
+    set prelude "TMUX=$tmux_env_q; export TMUX; tmux() { command tmux -S $socket_q \"\$@\"; }\n"
+    catch { set out [exec sh -lc "$prelude$cmd 2>&1"] } _
     return [string trim $out]
 }
 proc tmux_run {cmd} { send "$cmd\r"; sync_tmux }
@@ -25,7 +56,7 @@ proc key_present {table key} {
 proc with_temp_client {session {ms 200}} {
     set before [sh "tmux list-clients -F '#{client_tty}' || true"]
     set saved $::spawn_id
-    spawn -noecho tmux attach -t $session
+    spawn -noecho env -u TMUX tmux -S $::socket attach -t $session
     after $ms
     set after_list [sh "tmux list-clients -F '#{client_tty}' || true"]
     set newtty ""
@@ -42,6 +73,13 @@ proc with_temp_client {session {ms 200}} {
     catch { wait }
     set ::spawn_id $saved
 }
+
+proc cleanup {} {
+    catch { sh "tmux kill-server >/dev/null 2>&1 || true" }
+}
+
+trap { cleanup; exit 130 } SIGINT
+trap { cleanup; exit 143 } SIGTERM
 
 # assert helpers
 proc assert_eq {got expected msg} {
@@ -82,15 +120,15 @@ spawn bash
 sync_tmux
 puts "\n1) start server with test conf"
 puts "------------------------------"
-tmux_run "tmux -f /app/tests/tmux.conf new-session -d -s locktest bash"
-tmux_run "tmux -f /app/tests/tmux.conf attach -t locktest"
+tmux_run "$tmux_cmd -f [shell_quote $test_conf] new-session -d -s locktest bash"
+tmux_run "$tmux_cmd -f [shell_quote $test_conf] attach -t locktest"
 
 # silence message line so 'display-message' doesn't print to pty
 tmux_run "tmux set -g display-time 0"
 
 # Re-run plugin + (re)source conf (mirror user flow)
-tmux_run "tmux run-shell /app/tmux-lock.tmux"
-tmux_run "tmux source-file /app/tests/tmux.conf"
+tmux_run "tmux run-shell [shell_quote $plugin_file]"
+tmux_run "tmux source-file [shell_quote $test_conf]"
 sync_tmux
 
 # Collect constants we'll compare against
@@ -110,8 +148,8 @@ assert_true {[key_present off  $rescue_key]}   "rescue bound in off"
 assert_true {[key_present root MouseDown1StatusLeft]} "MouseDown1StatusLeft bound in root"
 assert_true {[key_present off  MouseDown1StatusLeft]} "MouseDown1StatusLeft bound in off"
 
-set pageup_line [get "tmux list-keys -T root C-Pageup || tmux list-keys -T root C-PPage || true"]
-set left_line   [get "tmux list-keys -T root C-S-Left || true"]
+set pageup_line [get "tmux list-keys -T root | grep -E ' C-(Pageup|PPage) ' || true"]
+set left_line   [get "tmux list-keys -T root | grep ' C-S-Left ' || true"]
 assert_true {[string length $pageup_line] > 0} "PageUp synthetic bind present before lock"
 assert_true {[string length $left_line]  > 0}  "C-S-Left synthetic bind present before lock"
 
@@ -124,7 +162,7 @@ assert_eq $uk1_before "up-1" {user-keys[1] set before lock}
 
 puts "\n3) lock ON via script"
 puts "---------------------"
-tmux_run "tmux run-shell \"TMUX_LOCK_TARGET=\#{client_tty} /app/scripts/lock_on.sh\""
+tmux_run "tmux run-shell \"TMUX_LOCK_TARGET=\#{client_tty} [shell_quote $lock_on]\""
 set state_on      [get "tmux show -gv @tmux_lock_state"]
 set keytable_on   [get "tmux display -p '#{client_key_table}'"]
 set prefix_on     [get "tmux show -gv prefix"]
@@ -137,15 +175,15 @@ assert_contains $prefix_on "None"  "prefix set to None while locked"
 assert_eq $status_locked $lock_block "status-left is exactly the LOCKED badge"
 
 set bl_user0   [get "tmux list-keys -T root User0 || true"]
-set bl_pageup2 [get "tmux list-keys -T root C-Pageup || tmux list-keys -T root C-PPage || true"]
-set bl_csl     [get "tmux list-keys -T root C-S-Left || true"]
+set bl_pageup2 [get "tmux list-keys -T root | grep -E ' C-(Pageup|PPage) ' || true"]
+set bl_csl     [get "tmux list-keys -T root | grep ' C-S-Left ' || true"]
 assert_eq $bl_user0  "" "User0 unbound while locked"
 assert_eq $bl_pageup2 "" "PageUp unbound while locked"
 assert_eq $bl_csl    "" "C-S-Left unbound while locked"
 
 puts "\n4) unlock via script"
 puts "--------------------"
-tmux_run "tmux run-shell \"TMUX_LOCK_TARGET=\#{client_tty} /app/scripts/lock_off.sh\""
+tmux_run "tmux run-shell \"TMUX_LOCK_TARGET=\#{client_tty} [shell_quote $lock_off]\""
 set state_off_now   [get "tmux show -gv @tmux_lock_state"]
 set keytable_off    [get "tmux display -p '#{client_key_table}'"]
 set prefix_off      [get "tmux show -gv prefix"]
@@ -157,8 +195,8 @@ assert_not_contains $keytable_off "off" "client key-table no longer 'off'"
 assert_not_contains $prefix_off "None"  "prefix restored (not None)"
 assert_eq $status_unlocked "ORIG-LEFT" "status-left restored to original text"
 
-tmux_run "tmux source-file /app/tests/tmux.conf"
-set rebuilt_pageup [get "tmux list-keys -T root C-Pageup || tmux list-keys -T root C-PPage || true"]
+tmux_run "tmux source-file [shell_quote $test_conf]"
+set rebuilt_pageup [get "tmux list-keys -T root | grep -E ' C-(Pageup|PPage) ' || true"]
 assert_contains $rebuilt_pageup "\#{pane_id}" "format tokens preserved on re-source"
 
 set uk0_after [get {tmux show -sv 'user-keys[0]' || true}]
@@ -168,10 +206,10 @@ assert_eq $uk1_after "up-1" {user-keys[1] restored}
 
 puts "\n5) rapid toggles (with_lock.sh) x8"
 puts "-----------------------------------"
-tmux_run "tmux run-shell /app/scripts/lock_off.sh"
+tmux_run "tmux run-shell [shell_quote $lock_off]"
 sync_tmux
 for {set i 0} {$i < 8} {incr i} {
-    tmux_run "tmux run-shell /app/scripts/with_lock.sh toggle"
+    tmux_run "tmux run-shell \"[shell_quote $with_lock] toggle\""
     after 40
 }
 set state_after_burst  [get "tmux show -gv @tmux_lock_state"]
@@ -189,7 +227,7 @@ puts "--------------------------------------"
 # hard baseline
 set curtty [get "tmux display -p '#{client_tty}'"]
 sh "tmux set-hook -gu client-attached"
-sh "TMUX_LOCK_TARGET=$curtty /app/scripts/with_lock.sh off"
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $with_lock] off"
 sh "tmux set -u key-table"
 sh "tmux switch-client -T root"
 sh "tmux set -g status-left '$orig_left'"
@@ -202,7 +240,7 @@ assert_contains     [get "tmux show -gv @tmux_lock_state"] "off"  "precheck: sta
 assert_not_contains [get "tmux display -p '#{client_key_table}'"] "off" "precheck: table root"
 
 # lock and verify badge
-sh "TMUX_LOCK_TARGET=$curtty /app/scripts/lock_on.sh"
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $lock_on]"
 assert_eq [get "tmux show -gv status-left"] $lock_block "badge before attach"
 
 # simulate detach/attach using a temp client (doesn't steal our pty)
@@ -212,7 +250,7 @@ with_temp_client locktest 250
 assert_eq [get "tmux show -gv status-left"] $lock_block "badge after attach"
 
 # cleanup so block 7 starts clean
-sh "TMUX_LOCK_TARGET=$curtty /app/scripts/with_lock.sh off"
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $with_lock] off"
 sh "tmux set -u key-table"
 sh "tmux switch-client -T root"
 sh "tmux set -g status-left '$orig_left'"
@@ -231,7 +269,7 @@ set curtty [get "tmux display -p '#{client_tty}'"]
 
 # Hard reset so we never start with the badge showing (and kill any stale hooks)
 sh "tmux set-hook -gu client-attached"
-sh "TMUX_LOCK_TARGET=$curtty /app/scripts/with_lock.sh off"
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $with_lock] off"
 sh "tmux set -u key-table"
 sh "tmux switch-client -T root"
 sh "tmux set -g status-left 'ORIG-LEFT'"
@@ -255,13 +293,13 @@ set new_orig [get "tmux show -gv status-left"]
 assert_eq $new_orig "ORIG-LEFT-CHANGED" "we changed origin text"
 
 # LOCK (sync) => badge should show, compare *inside tmux* to avoid quoting pitfalls
-sh "TMUX_LOCK_TARGET=$curtty /app/scripts/lock_on.sh"
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $lock_on]"
 after 150
 set is_exact [get "tmux display -p '#{==:#{status-left},#{@tmux_lock_block}}'"]
 assert_eq $is_exact "1" "LOCKED badge shown after changing origin"
 
 # UNLOCK (sync) => exact origin should come back
-sh "TMUX_LOCK_TARGET=$curtty /app/scripts/lock_off.sh"
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $lock_off]"
 after 150
 assert_eq [get "tmux show -gv status-left"] "ORIG-LEFT-CHANGED" "origin restored exactly after unlock"
 
@@ -272,6 +310,41 @@ assert_true {[key_present off  $rescue_key]}   "rescue remains bound in off"
 assert_true {[key_present root MouseDown1StatusLeft]} "MouseDown1StatusLeft still bound in root"
 assert_true {[key_present off  MouseDown1StatusLeft]} "MouseDown1StatusLeft still bound in off"
 
+puts "\n9) auto-lock commands lock/unlock current pane"
+puts "----------------------------------------------"
+
+set curtty [get "tmux display -p '#{client_tty}'"]
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $with_lock] off"
+sh "tmux set -u key-table"
+sh "tmux switch-client -T root"
+sh "tmux set -g status-left 'ORIG-LEFT'"
+sh "tmux set -g @tmux_lock_state off"
+sh "tmux set -g @tmux_lock_auto_active off"
+sh "tmux set -g @tmux_lock_auto_pane ''"
+sh "tmux set -g @tmux_lock_auto_target ''"
+sh "tmux set -g @tmux_lock_auto_command ''"
+sh "tmux set -g @tmux_lock_auto_suppressed_pane ''"
+sh "tmux set -g @tmux_lock_auto_suppressed_command ''"
+after 150
+
+tmux_run "sleep 2"
+after 200
+set sleep_cmd [get "tmux display -p '#{pane_current_command}'"]
+assert_eq $sleep_cmd "sleep" "test pane is running an auto-lock command"
+
+sh "[shell_quote $auto_lock] check"
+after 150
+assert_contains [get "tmux show -gv @tmux_lock_state"] "on" "auto-lock turned lock on"
+assert_contains [get "tmux show -gv @tmux_lock_auto_active"] "on" "auto-lock metadata is active"
+assert_contains [get "tmux display -p '#{client_key_table}'"] "off" "auto-lock switched client to off table"
+
+after 2400
+sh "[shell_quote $auto_lock] check"
+after 150
+assert_contains     [get "tmux show -gv @tmux_lock_state"] "off" "auto-lock turned lock off after command exit"
+assert_not_contains [get "tmux display -p '#{client_key_table}'"] "off" "client key-table restored after auto-unlock"
+assert_contains     [get "tmux show -gv @tmux_lock_auto_active"] "off" "auto-lock metadata cleared"
+
 # done!
-tmux_run "tmux kill-server"
+cleanup
 exit $exit_status

@@ -15,6 +15,8 @@ def @tmux_lock_user_keys        ''
 def @tmux_lock_unbind_keys      'C-S-Left C-S-Right C-S-Up C-S-Down C-Pageup C-Pagedown'
 def @tmux_lock_rescue_key       'M-Escape'
 def @tmux_hide_status_onlock    'false'
+def @tmux_lock_auto_commands    ''
+def @tmux_lock_auto_interval    '1'
 
 # locked badge
 tmux set -g @tmux_lock_block '#[bg=#{@tmux_lock_passthrough_bg}]#[fg=#{@tmux_lock_p_text_color}]#[bold] LOCKED #[bg=#{@tmux_lock_bar_bg}]#[fg=#{@tmux_lock_passthrough_bg}]#[default]'
@@ -40,3 +42,8 @@ tmux bind   -T root MouseDown1StatusLeft \
 tmux unbind -T off  MouseDown1StatusLeft 2>/dev/null || true
 tmux bind   -T off  MouseDown1StatusLeft \
 "if-shell -F '#{==:#{@tmux_lock_state},on}' 'run-shell \"TMUX_LOCK_TARGET=#{client_tty} ${CURRENT_DIR}/scripts/lock_off.sh\"' ''"
+
+# Start the auto-lock monitor only when commands are configured.
+if [ -n "$(tmux show -gv @tmux_lock_auto_commands 2>/dev/null || true)" ]; then
+  tmux run-shell -b "'${CURRENT_DIR}/scripts/auto_lock.sh' start"
+fi
