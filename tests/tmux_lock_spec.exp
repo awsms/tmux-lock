@@ -310,7 +310,60 @@ assert_true {[key_present off  $rescue_key]}   "rescue remains bound in off"
 assert_true {[key_present root MouseDown1StatusLeft]} "MouseDown1StatusLeft still bound in root"
 assert_true {[key_present off  MouseDown1StatusLeft]} "MouseDown1StatusLeft still bound in off"
 
-puts "\n9) auto-lock commands lock/unlock current pane"
+puts "\n9) split panes zoom only the locked pane"
+puts "----------------------------------------"
+
+set curtty [get "tmux display -p '#{client_tty}'"]
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $with_lock] off"
+sh "tmux set -u key-table"
+sh "tmux switch-client -T root"
+sh "tmux set -g @tmux_lock_state off"
+sh "tmux set -g @tmux_lock_zoom_pane_onlock true"
+sh "tmux kill-pane -a"
+sh "tmux resize-pane -Z 2>/dev/null || true"
+after 150
+
+set locked_pane [get "tmux display -p '#{pane_id}'"]
+sh "tmux split-window -h -d bash"
+after 150
+assert_eq [get "tmux display -p '#{window_panes}'"] "2" "test window has a split"
+assert_eq [get "tmux display -p '#{window_zoomed_flag}'"] "0" "test window starts unzoomed"
+
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $lock_on]"
+after 150
+assert_eq [get "tmux display -p '#{window_zoomed_flag}'"] "1" "lock zooms split window"
+assert_eq [get "tmux display -p '#{pane_id}'"] $locked_pane "locked pane remains active while zoomed"
+assert_eq [get "tmux show -gv @tmux_lock_zoomed_on_lock"] "on" "lock records that it created the zoom"
+
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $lock_off]"
+after 150
+assert_eq [get "tmux display -p '#{window_zoomed_flag}'"] "0" "unlock restores split layout"
+assert_eq [get "tmux display -p '#{window_panes}'"] "2" "split panes still exist after unlock"
+sh "tmux kill-pane -a"
+after 100
+
+puts "\n10) already-zoomed panes stay zoomed after unlock"
+puts "-------------------------------------------------"
+
+sh "tmux split-window -h -d bash"
+after 150
+sh "tmux resize-pane -Z"
+after 100
+assert_eq [get "tmux display -p '#{window_zoomed_flag}'"] "1" "precheck: window manually zoomed"
+
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $lock_on]"
+after 150
+assert_eq [get "tmux display -p '#{window_zoomed_flag}'"] "1" "lock preserves existing zoom"
+assert_eq [get "tmux show -gv @tmux_lock_zoomed_on_lock"] "off" "lock records existing zoom as user-owned"
+
+sh "TMUX_LOCK_TARGET=$curtty [shell_quote $lock_off]"
+after 150
+assert_eq [get "tmux display -p '#{window_zoomed_flag}'"] "1" "unlock leaves pre-existing zoom alone"
+sh "tmux resize-pane -Z"
+sh "tmux kill-pane -a"
+after 100
+
+puts "\n11) auto-lock commands lock/unlock current pane"
 puts "----------------------------------------------"
 
 set curtty [get "tmux display -p '#{client_tty}'"]

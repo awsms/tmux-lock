@@ -6,6 +6,7 @@ Then unlock to get all your tmux keybindings back.
 
 * By default, shows a **LOCKED** badge in `status-left` while active. Theme of the badge was made to be used with `fabioluciano/tmux-tokyo-night` (as that's what I use).
 * You can also completely hide tmux's status bar on **LOCK** (so only the nested tmux status bar, or nvim status bar is visible for ex).
+* If the active window is split, tmux-lock zooms the locked pane while locked so only that pane is visible, then restores the layout on unlock.
 * Optionally auto-locks while configured programs are running in the active pane, then unlocks when they exit.
 * Disables the tmux prefix while locked (so you don't accidentally trigger tmux commands). Thus lets you use the same prefix key for nested/remote and local tmux.
 * tl;dr how it works: it saves your current root-table bindings and user-keys, wipes everything, then restores them on unlock.
@@ -69,6 +70,7 @@ set -g @tmux_lock_toggle_key 'C-b'
 * Saves your current `-T root` key bindings and selected `user-keys[...]`, then unbinds them.
 * Turns **`xterm-keys` off** and sets **prefix to `None`** so raw CSI sequences go to the app in the current window.
 * Switches your client to the **`off`** key-table for passthrough.
+* Zooms the active pane when the window has splits, unless it was already zoomed.
 * Paints `status-left` with a bold **LOCKED** badge.
 * Leaves a minimal escape both in `root` and `off` tables so you can always unlock.
 
@@ -91,6 +93,7 @@ On unlock, everything above is restored and `status-left` returns to what you ha
 | `@tmux_hide_status_onlock`  | `false`        | When `true`, hide the status bar while locked and restore it on unlock.        |
 | `@tmux_lock_auto_commands`  | `""`           | Space/comma/JSON-ish list of foreground commands that should auto-lock, e.g. `vim micro nvim`. |
 | `@tmux_lock_auto_interval`  | `1`            | Auto-lock monitor interval in seconds.                                         |
+| `@tmux_lock_zoom_pane_onlock` | `true`       | Zoom the locked pane when the current window has splits, then restore on unlock. |
 > Note: `@tmux_lock_unbind_keys` exists in the codebase for testing, but the plugin currently saves **all** root binds and unbinds them while locked (then restores on unlock).
 
 ---

@@ -17,6 +17,7 @@ def @tmux_lock_rescue_key       'M-Escape'
 def @tmux_hide_status_onlock    'false'
 def @tmux_lock_auto_commands    ''
 def @tmux_lock_auto_interval    '1'
+def @tmux_lock_zoom_pane_onlock 'true'
 
 # locked badge
 tmux set -g @tmux_lock_block '#[bg=#{@tmux_lock_passthrough_bg}]#[fg=#{@tmux_lock_p_text_color}]#[bold] LOCKED #[bg=#{@tmux_lock_bar_bg}]#[fg=#{@tmux_lock_passthrough_bg}]#[default]'

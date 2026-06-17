@@ -31,6 +31,9 @@ do_unbind_keys
 tmux set -u key-table               2>/dev/null || true     # clear any previous override
 tmux set    key-table off                                   # current client/session only
 
+# If this window is split, show only the pane that was locked.
+zoom_pane_if_enabled
+
 # saving the original badge
 status_save_origin
 

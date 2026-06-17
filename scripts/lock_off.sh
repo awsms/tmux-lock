@@ -24,5 +24,7 @@ restore_global_binds 2>/dev/null || true    # no-op if not using it
 status_set_origin
 # optionally restore the status bar visibility
 status_restore_if_enabled
+# Restore a split layout hidden by lock-time zoom.
+restore_zoom_if_needed
 tmux refresh-client -S
 tmux display-message "#[bg=#{@tmux_lock_bar_bg},fg=#{@tmux_lock_passthrough_bg},fill=#{@tmux_lock_bar_bg}]Lock: OFF (tmux active, binds & user-keys restored)"

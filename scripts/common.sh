@@ -222,3 +222,39 @@ status_restore_if_enabled() {
     tmux set -g @tmux_lock_orig_status "" 2>/dev/null || true
   fi
 }
+
+# Pane zoom helpers. If locking from a split window, zoom the locked pane so the
+# local tmux chrome gets out of the way, then restore only zooms we created.
+zoom_pane_if_enabled() {
+  is_truthy @tmux_lock_zoom_pane_onlock || return 0
+
+  local pane panes zoomed
+  pane="$(_display -p '#{pane_id}')"
+  panes="$(_display -p '#{window_panes}')"
+  zoomed="$(_display -p '#{window_zoomed_flag}')"
+
+  setopt @tmux_lock_zoomed_on_lock off
+  setopt @tmux_lock_zoom_pane "$pane"
+
+  if [[ "$panes" =~ ^[0-9]+$ ]] && [ "$panes" -gt 1 ] && [ "$zoomed" = "0" ]; then
+    tmux resize-pane -Z -t "$pane"
+    setopt @tmux_lock_zoomed_on_lock on
+  fi
+}
+
+restore_zoom_if_needed() {
+  is_truthy @tmux_lock_zoom_pane_onlock || return 0
+  is_truthy @tmux_lock_zoomed_on_lock || return 0
+
+  local pane zoomed
+  pane="$(tmux show -gv @tmux_lock_zoom_pane 2>/dev/null || true)"
+  if [ -n "$pane" ]; then
+    zoomed="$(tmux display -pt "$pane" '#{window_zoomed_flag}' 2>/dev/null || true)"
+    if [ "$zoomed" = "1" ]; then
+      tmux resize-pane -Z -t "$pane"
+    fi
+  fi
+
+  setopt @tmux_lock_zoomed_on_lock off
+  setopt @tmux_lock_zoom_pane ""
+}
